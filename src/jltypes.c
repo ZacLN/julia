@@ -1950,8 +1950,9 @@ void jl_init_types(void) JL_GC_DISABLED
 
     jl_typemap_entry_type =
         jl_new_datatype(jl_symbol("TypeMapEntry"), core, jl_any_type, jl_emptysvec,
-                        jl_perm_symsvec(10,
+                        jl_perm_symsvec(11,
                             "next",
+                            "prev",
                             "sig",
                             "simplesig",
                             "guardsigs",
@@ -1961,8 +1962,9 @@ void jl_init_types(void) JL_GC_DISABLED
                             "isleafsig",
                             "issimplesig",
                             "va"),
-                        jl_svec(10,
+                        jl_svec(11,
                             jl_any_type, // Union{TypeMapEntry, Nothing}
+                            jl_any_type, // Union{Vector{TypeMapEntry}, Nothing}
                             jl_type_type, // TupleType
                             jl_any_type, // TupleType
                             jl_any_type, // SimpleVector{TupleType}
@@ -1972,7 +1974,7 @@ void jl_init_types(void) JL_GC_DISABLED
                             jl_bool_type,
                             jl_bool_type,
                             jl_bool_type),
-                        0, 1, 4);
+                        0, 1, 5);
 
     jl_function_type = jl_new_abstracttype((jl_value_t*)jl_symbol("Function"), core, jl_any_type, jl_emptysvec);
     jl_builtin_type  = jl_new_abstracttype((jl_value_t*)jl_symbol("Builtin"), core, jl_function_type, jl_emptysvec);

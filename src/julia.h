@@ -489,6 +489,7 @@ typedef struct _jl_module_t {
 typedef struct _jl_typemap_entry_t {
     JL_DATA_TYPE
     struct _jl_typemap_entry_t *next; // invasive linked list
+    jl_array_t *prev; // forward references to later items (typemap entries) which might sort before this one
     jl_tupletype_t *sig; // the type signature for this entry
     jl_tupletype_t *simplesig; // a simple signature for fast rejection
     jl_svec_t *guardsigs;

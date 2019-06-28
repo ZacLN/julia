@@ -590,7 +590,6 @@ JL_DLLEXPORT jl_array_t *jl_idtable_rehash(jl_array_t *a, size_t newsz);
 
 JL_DLLEXPORT jl_methtable_t *jl_new_method_table(jl_sym_t *name, jl_module_t *module);
 jl_method_instance_t *jl_get_specialization1(jl_tupletype_t *types, size_t world, size_t *min_valid, size_t *max_valid, int mt_cache);
-JL_DLLEXPORT int jl_has_call_ambiguities(jl_value_t *types, jl_method_t *m);
 jl_method_instance_t *jl_get_specialized(jl_method_t *m, jl_value_t *types, jl_svec_t *sp);
 JL_DLLEXPORT jl_value_t *jl_rettype_inferred(jl_method_instance_t *li, size_t min_world, size_t max_world);
 JL_DLLEXPORT jl_value_t *jl_methtable_lookup(jl_methtable_t *mt, jl_value_t *type, size_t world);
@@ -944,8 +943,7 @@ jl_typemap_entry_t *jl_typemap_insert(jl_typemap_t **cache,
                                       jl_tupletype_t *simpletype, jl_svec_t *guardsigs,
                                       jl_value_t *newvalue, int8_t offs,
                                       const struct jl_typemap_info *tparams,
-                                      size_t min_world, size_t max_world,
-                                      jl_value_t **overwritten);
+                                      size_t min_world, size_t max_world);
 
 jl_typemap_entry_t *jl_typemap_assoc_by_type(
         jl_typemap_t *ml_or_cache JL_PROPAGATES_ROOT,
@@ -968,6 +966,7 @@ STATIC_INLINE jl_typemap_entry_t *jl_typemap_assoc_exact(
     }
     return NULL;
 }
+jl_typemap_entry_t *jl_typemap_morespecific_by_type(jl_typemap_entry_t *first, jl_value_t *types, jl_svec_t **penv, size_t world);
 
 typedef int (*jl_typemap_visitor_fptr)(jl_typemap_entry_t *l, void *closure);
 int jl_typemap_visitor(jl_typemap_t *a, jl_typemap_visitor_fptr fptr, void *closure);

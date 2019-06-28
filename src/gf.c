@@ -101,7 +101,7 @@ JL_DLLEXPORT jl_method_instance_t *jl_specializations_get_linfo(jl_method_t *m J
     // TODO: fuse lookup and insert steps
     jl_typemap_insert(&m->specializations, (jl_value_t*)m, (jl_tupletype_t*)type,
             NULL, jl_emptysvec, (jl_value_t*)mi, 0, &tfunc_cache,
-            1, ~(size_t)0, NULL);
+            1, ~(size_t)0);
     JL_UNLOCK(&m->writelock);
     JL_GC_POP();
     return mi;
@@ -162,7 +162,7 @@ jl_datatype_t *jl_mk_builtin_func(jl_datatype_t *dt, const char *name, jl_fptr_a
 
     jl_methtable_t *mt = dt->name->mt;
     jl_typemap_insert(&mt->cache, (jl_value_t*)mt, jl_anytuple_type,
-        NULL, jl_emptysvec, (jl_value_t*)mi, 0, &lambda_cache, 1, ~(size_t)0, NULL);
+        NULL, jl_emptysvec, (jl_value_t*)mi, 0, &lambda_cache, 1, ~(size_t)0);
     mt->frozen = 1;
     JL_GC_POP();
     return dt;
@@ -929,7 +929,7 @@ static jl_method_instance_t *cache_method(
                     guards++;
                     // alternative approach: insert sentinel entry
                     //jl_typemap_insert(cache, parent, (jl_tupletype_t*)jl_svecref(m, 0),
-                    //        NULL, jl_emptysvec, /*guard*/NULL, jl_cachearg_offset(mt), &lambda_cache, other->min_world, other->max_world, NULL);
+                    //        NULL, jl_emptysvec, /*guard*/NULL, jl_cachearg_offset(mt), &lambda_cache, other->min_world, other->max_world);
                 }
             }
         }
@@ -978,18 +978,32 @@ static jl_method_instance_t *cache_method(
         temp2 = (jl_value_t*)simplett;
     }
 
-    // TODO: short-circuit if this exact entry is already present
+    int8_t offs = mt ? jl_cachearg_offset(mt) : 1;
+    // short-circuit if this exact entry is already present
     // to avoid adding a new duplicate copy of it
-    // (need to verify that simplett and guardsigs are actually a full match first though)
-    //if (cachett != tt) {
-    //    jl_typemap_entry_t *entry = jl_typemap_assoc_by_type(*cache, (jl_value_t*)cachett, NULL, /*subtype*/0, jl_cachearg_offset(mt), world, /*max_world_mask*/0);
-    //    if (entry && entry->func.value)
-    //        return (jl_method_instance_t*)entry->func.value;
-    //}
+    if (cachett != tt && simplett == NULL) {
+        jl_typemap_entry_t *entry = jl_typemap_assoc_by_type(*cache, (jl_value_t*)cachett, NULL, /*subtype*/0, offs, min_valid, /*max_world_mask*/0);
+        if (entry && (jl_value_t*)entry->simplesig == jl_nothing) {
+            if (jl_egal((jl_value_t*)guardsigs, (jl_value_t*)entry->guardsigs)) {
+                // just update the existing entry to reflect new knowledge
+                if (entry->min_world > min_valid)
+                    entry->min_world = min_valid;
+                if (entry->max_world < max_valid)
+                    entry->max_world = max_valid;
+                if (entry->func.linfo == NULL) {
+                    entry->func.linfo = newmeth;
+                    jl_gc_wb(entry, newmeth);
+                }
+                assert(entry->func.linfo == newmeth);
+                JL_GC_POP();
+                return newmeth;
+            }
+        }
+    }
 
     jl_typemap_insert(cache, parent, cachett, simplett, guardsigs,
-            (jl_value_t*)newmeth, mt ? jl_cachearg_offset(mt) : 1, &lambda_cache,
-            min_valid, max_valid, NULL);
+            (jl_value_t*)newmeth, offs, &lambda_cache,
+            min_valid, max_valid);
 
     JL_GC_POP();
     return newmeth;
@@ -1014,8 +1028,9 @@ static jl_method_instance_t *jl_mt_assoc_by_type(jl_methtable_t *mt, jl_datatype
     JL_GC_PUSH3(&tt, &env, &newparams);
     entry = jl_typemap_assoc_by_type(mt->defs, (jl_value_t*)tt, &env, /*subtype*/1, /*offs*/0, world, /*max_world_mask*/0);
     if (entry != NULL) {
-        jl_method_t *m = entry->func.method;
-        if (!jl_has_call_ambiguities((jl_value_t*)tt, m)) {
+        entry = jl_typemap_morespecific_by_type(entry, (jl_value_t*)tt, &env, world);
+        if (entry != NULL) {
+            jl_method_t *m = entry->func.method;
             if (jl_options.trace_compile != NULL) {
                 if (s_precompile == NULL) {
                     const char* t = jl_options.trace_compile;
@@ -1089,45 +1104,81 @@ static int check_ambiguous_visitor(jl_typemap_entry_t *oldentry, struct typemap_
         return 1;
     }
     if (oldentry->max_world < ~(size_t)0)
-        return 1;
-    jl_typemap_t *map = closure->defs;
+        return 1; // no world has both active
+
+    jl_typemap_entry_t *before = (closure->after ? closure->newentry : oldentry);
+    jl_typemap_entry_t *after = (closure->after ? oldentry : closure->newentry);
     jl_tupletype_t *type = (jl_tupletype_t*)closure->match.type;
-    jl_method_t *m = closure->newentry->func.method;
     jl_tupletype_t *sig = oldentry->sig;
     jl_value_t *isect = closure->match.ti;
 
-    // we know type ∩ sig != Union{} and
-    // we are assuming that
-    //        !jl_type_morespecific(type, sig) [before]
-    //     or !jl_type_morespecific(sig, type) [after]
-    // based on their sort order in the typemap
-    // now we are checking that the reverse is true
-    int msp;
-    if (closure->match.issubty) {
-        assert(closure->after);
-        msp = 1;
+    int msp = 1; // TODO: msp is a really terrible name
+    int shadowed = 0;
+    int reorder = 0;
+    if (closure->match.issubty) { // (new)type <: (old)sig
+        // new entry is more specific
+        if (!closure->after)
+            reorder = 1;
+        shadowed = 1;
+        // TODO: can stop search now? (copy remainder from oldentry)
     }
-    else if (closure->after) {
-        assert(!jl_subtype((jl_value_t*)sig, (jl_value_t*)type));
-        msp = jl_type_morespecific_no_subtype((jl_value_t*)type, (jl_value_t*)sig);
+    else if (jl_subtype((jl_value_t*)sig, (jl_value_t*)type)) {
+        // old entry is more specific
+        if (closure->after)
+            reorder = 1;
+    }
+    else if (jl_type_morespecific_no_subtype((jl_value_t*)type, (jl_value_t*)sig)) {
+        // new entry is more specific
+        if (!closure->after)
+            reorder = 1;
+        shadowed = 1;
+    }
+    else if (jl_type_morespecific_no_subtype((jl_value_t*)sig, (jl_value_t*)type)) {
+        // old entry is more specific
+        if (closure->after)
+            reorder = 1;
     }
     else {
-        if (jl_subtype((jl_value_t*)sig, (jl_value_t*)type))
-            msp = 1;
-        else
-            msp = jl_type_morespecific_no_subtype((jl_value_t*)sig, (jl_value_t*)type);
+        // sort order is ambiguous
+        reorder = 1;
+        shadowed = 1;
+        msp = 0;
     }
 
-    if (!msp) {
-        // see if the intersection is covered by another existing method
-        // that will resolve the ambiguity (by being more specific than either)
-        // (if type-morespecific made a mistake, this also might end up finding
-        // that isect == type or isect == sig and return the original match)
+    // if this type-intersection is exact, then we can
+    // see if the intersection is covered by another existing entry
+    // that will resolve the ambiguity (by being more specific than either)
+    // (if type-morespecific made a mistake, this also might end up finding
+    // that isect == type or isect == sig and return the original match)
+    if (reorder && jl_subtype(isect, (jl_value_t*)sig) && jl_subtype(isect, (jl_value_t*)type)) {
+        size_t world = closure->newentry->min_world;
+        if (oldentry->min_world > world)
+            world = oldentry->min_world;
         jl_typemap_entry_t *l = jl_typemap_assoc_by_type(
-                map, isect, NULL, /*subtype*/0, /*offs*/0,
-                closure->newentry->min_world, /*max_world_mask*/0);
-        if (l != NULL) // ok, intersection is covered
-            return 1;
+                closure->defs, isect, NULL, /*subtype*/0, /*offs*/0,
+                world, /*max_world_mask*/0);
+        if (l != NULL) { // ok, intersection is covered
+            // also need to check that `l` isn't the `after` entry
+            if (l != after) {
+                reorder = 0; // this lack of ordering doesn't matter (unless we delete this method--then it will)
+                shadowed = 0; // we wouldn't find anything that mattered
+                msp = 1; // we don't care about this
+            }
+        }
+    }
+
+    // ok: record specificity ordering violation
+    if (reorder) {
+        if ((jl_value_t*)before->prev == jl_nothing) {
+            before->prev = jl_alloc_vec_any(0);
+            jl_gc_wb(before, before->prev);
+        }
+        jl_array_ptr_1d_push(before->prev, (jl_value_t*)after);
+    }
+
+    //// LEGACY SUPPORT: populate the method.ambig field
+    if (!msp) {
+        jl_method_t *m = closure->newentry->func.method;
         jl_method_t *mambig = oldentry->func.method;
         if (m->ambig == jl_nothing) {
             m->ambig = (jl_value_t*) jl_alloc_vec_any(0);
@@ -1152,9 +1203,11 @@ static int check_ambiguous_visitor(jl_typemap_entry_t *oldentry, struct typemap_
             jl_printf(s, "\nbefore the new definition.\n");
         }
     }
-    if (!msp || closure->after) {
-        // record that this method definition is being partially replaced
-        // (either with a real definition, or an ambiguity error)
+    ////
+
+    // ok: record that this method definition is being partially replaced
+    // (either with a real definition, or an ambiguity error)
+    if (shadowed) {
         if (closure->shadowed == NULL) {
             closure->shadowed = (jl_value_t*)oldentry;
         }
@@ -1207,33 +1260,40 @@ static int check_disabled_ambiguous_visitor(jl_typemap_entry_t *oldentry, struct
         closure->after = 1;
         return 1;
     }
-    if (!closure->after || oldentry->max_world < ~(size_t)0)  // the second condition prevents us from confusion in multiple cycles of add/delete
+    if (oldentry->max_world < ~(size_t)0)
         return 1;
     jl_tupletype_t *sig = oldentry->sig;
-    jl_value_t *isect = closure->match.ti;
+    jl_value_t *type = closure->match.type;
     jl_value_t *isect2 = NULL;
     if (closure->shadowed == NULL)
         closure->shadowed = (jl_value_t*)jl_alloc_vec_any(0);
     JL_GC_PUSH1(&isect2);
     int i, l = jl_array_len(closure->shadowed);
     for (i = 0; i < l; i++) {
-        jl_typemap_entry_t *mth = (jl_typemap_entry_t*)jl_array_ptr_ref(closure->shadowed, i);
-        isect2 = jl_type_intersection((jl_value_t*)mth->sig, (jl_value_t*)sig);
+        jl_typemap_entry_t *before = (jl_typemap_entry_t*)jl_array_ptr_ref(closure->shadowed, i);
+        isect2 = jl_type_intersection((jl_value_t*)before->sig, (jl_value_t*)sig);
         // see if the intersection was covered by precisely the disabled method
         // that means we now need to record the ambiguity
-        if (jl_types_equal(isect, isect2)) {
-            jl_method_t *mambig = mth->func.method;
+        if (jl_types_equal(type, isect2)) {
+            if ((jl_value_t*)before->prev == jl_nothing) {
+                before->prev = jl_alloc_vec_any(0);
+                jl_gc_wb(before, before->prev);
+            }
+            jl_array_ptr_1d_push(before->prev, (jl_value_t*)oldentry);
+            //// LEGACY SUPPORT: populate the method.ambig field
             jl_method_t *m = oldentry->func.method;
+            jl_method_t *mambig = before->func.method;
             if (m->ambig == jl_nothing) {
                 m->ambig = (jl_value_t*) jl_alloc_vec_any(0);
                 jl_gc_wb(m, m->ambig);
             }
             if (mambig->ambig == jl_nothing) {
-                mambig->ambig = (jl_value_t*) jl_alloc_vec_any(0);
+                mambig->ambig = (jl_value_t*)jl_alloc_vec_any(0);
                 jl_gc_wb(mambig, mambig->ambig);
             }
-            jl_array_ptr_1d_push((jl_array_t*)m->ambig, (jl_value_t*)mth);
+            jl_array_ptr_1d_push((jl_array_t*)m->ambig, (jl_value_t*)before);
             jl_array_ptr_1d_push((jl_array_t*)mambig->ambig, (jl_value_t*)oldentry);
+            ////
         }
     }
     JL_GC_POP();
@@ -1393,13 +1453,6 @@ JL_DLLEXPORT void jl_method_table_add_backedge(jl_methtable_t *mt, jl_value_t *t
     JL_UNLOCK(&mt->writelock);
 }
 
-//void jl_method_instance_delete(jl_method_instance_t *mi)
-//{
-//    invalidate_method_instance(mi, mi->min_world - 1, 0);
-//    if (JL_DEBUG_METHOD_INVALIDATION)
-//        jl_uv_puts(JL_STDOUT, "<<<\n", 4);
-//}
-
 struct invalidate_mt_env {
     jl_value_t *shadowed;
     size_t max_world;
@@ -1459,6 +1512,8 @@ static jl_typemap_entry_t *do_typemap_search(jl_methtable_t *mt JL_PROPAGATES_RO
 }
 #endif
 
+// TODO: decrease repeated work?
+// This implementation is stupidly inefficient, but probably correct
 JL_DLLEXPORT void jl_method_table_disable(jl_methtable_t *mt, jl_method_t *method)
 {
     if (jl_options.incremental && jl_generating_output())
@@ -1469,7 +1524,7 @@ JL_DLLEXPORT void jl_method_table_disable(jl_methtable_t *mt, jl_method_t *metho
     // Narrow the world age on the method to make it uncallable
     method->deleted_world = methodentry->max_world = jl_world_counter++;
     // Recompute ambiguities (deleting a more specific method might reveal ambiguities that it previously resolved)
-    (void)check_ambiguous_matches(mt->defs, methodentry, check_disabled_ambiguous_visitor); // TODO: decrease repeated work?
+    (void)check_ambiguous_matches(mt->defs, methodentry, check_disabled_ambiguous_visitor);
     // drop this method from mt->cache
     struct invalidate_mt_env mt_cache_env;
     mt_cache_env.max_world = methodentry->max_world - 1;
@@ -1497,30 +1552,22 @@ JL_DLLEXPORT void jl_method_table_insert(jl_methtable_t *mt, jl_method_t *method
     env.max_world = method->primary_world - 1;
     JL_GC_PUSH1(&oldvalue);
     JL_LOCK(&mt->writelock);
+    // first delete the existing entry (we'll disable it later)
+    jl_typemap_entry_t *oldentry = jl_typemap_assoc_by_type(mt->defs, type, NULL, /*subtype*/0, 0, method->primary_world, /*max_world_mask*/0);
+    if (oldentry) {
+        oldentry->max_world = method->primary_world - 1;
+        // TODO: just append our new entry right here
+    }
+    // then add our new entry
     jl_typemap_entry_t *newentry = jl_typemap_insert(&mt->defs, (jl_value_t*)mt,
             (jl_tupletype_t*)type, simpletype, jl_emptysvec, (jl_value_t*)method, 0, &method_defs,
-            method->primary_world, method->deleted_world, &oldvalue);
-    if (oldvalue) {
-        if (oldvalue == (jl_value_t*)method) {
-            // redundant add of same method; no need to do anything
-            JL_UNLOCK(&mt->writelock);
-            JL_GC_POP();
-            return;
-        }
-        jl_value_t *ambig = ((jl_method_t*)oldvalue)->ambig;
-        if (ambig != jl_nothing) {
-            method->ambig = ambig;
-            jl_gc_wb(method, ambig);
-            size_t i, na = jl_array_len(ambig);
-            for (i = 0; i < na; i++) {
-                jl_typemap_entry_t *mambig = (jl_typemap_entry_t*)jl_array_ptr_ref(ambig, i);
-                jl_array_ptr_1d_push((jl_array_t*)mambig->func.method->ambig, (jl_value_t*)newentry);
-            }
-        }
+            method->primary_world, method->deleted_world);
+    oldvalue = check_ambiguous_matches(mt->defs, newentry, check_ambiguous_visitor);
+    if (oldentry) {
+        oldvalue = oldentry->func.value;
         method_overwrite(newentry, (jl_method_t*)oldvalue);
     }
     else {
-        oldvalue = check_ambiguous_matches(mt->defs, newentry, check_ambiguous_visitor);
         if (mt->backedges) {
             jl_value_t **backedges = jl_array_ptr_data(mt->backedges);
             size_t i, na = jl_array_len(mt->backedges);
@@ -1953,43 +2000,29 @@ JL_DLLEXPORT int jl_compile_hint(jl_tupletype_t *types)
     return 1;
 }
 
-JL_DLLEXPORT jl_value_t *jl_get_spec_lambda(jl_tupletype_t *types, size_t world, size_t *min_valid, size_t *max_valid)
-{
-    jl_method_instance_t *mi = jl_get_specialization1(types, world, min_valid, max_valid, 0);
-    if (!mi || jl_has_call_ambiguities((jl_value_t*)types, mi->def.method))
-        return jl_nothing;
-    return (jl_value_t*)mi;
-}
-
-// see if a call to m with computed from `types` is ambiguous
-// XXX: returns wrong answers due to use of jl_world_counter
-JL_DLLEXPORT int jl_is_call_ambiguous(jl_value_t *types, jl_method_t *m)
-{
-    if (m->ambig == jl_nothing)
-        return 0;
-    for (size_t i = 0; i < jl_array_len(m->ambig); i++) {
-        jl_typemap_entry_t *mambig = (jl_typemap_entry_t*)jl_array_ptr_ref(m->ambig, i);
-        if (mambig->min_world <= jl_world_counter && jl_world_counter <= mambig->max_world)
-            if (jl_subtype((jl_value_t*)types, (jl_value_t*)mambig->sig))
-                return 1;
-    }
-    return 0;
-}
-
+#ifndef NDEBUG
 // see if a call to m with a subtype of `types` might be ambiguous
-// if types is from a call signature (isdispatchtuple), this is the same as jl_is_call_ambiguous above
-// XXX: returns wrong answers due to use of jl_world_counter
-JL_DLLEXPORT int jl_has_call_ambiguities(jl_value_t *types, jl_method_t *m)
+static int jl_has_call_ambiguities(jl_value_t *types, jl_method_t *m, size_t world)
 {
     if (m->ambig == jl_nothing)
         return 0;
     for (size_t i = 0; i < jl_array_len(m->ambig); i++) {
         jl_typemap_entry_t *mambig = (jl_typemap_entry_t*)jl_array_ptr_ref(m->ambig, i);
-        if (mambig->min_world <= jl_world_counter && jl_world_counter <= mambig->max_world)
+        if (mambig->min_world <= world && world <= mambig->max_world)
             if (!jl_has_empty_intersection((jl_value_t*)mambig->sig, types))
                 return 1;
     }
     return 0;
+}
+#endif
+
+JL_DLLEXPORT jl_value_t *jl_get_spec_lambda(jl_tupletype_t *types, size_t world, size_t *min_valid, size_t *max_valid)
+{
+    jl_method_instance_t *mi = jl_get_specialization1(types, world, min_valid, max_valid, 0);
+    if (!mi)
+        return jl_nothing;
+    assert(!jl_has_call_ambiguities((jl_value_t*)types, mi->def.method, world));
+    return (jl_value_t*)mi;
 }
 
 // add type of `f` to front of argument tuple type
@@ -2223,9 +2256,10 @@ JL_DLLEXPORT jl_value_t *jl_gf_invoke_lookup(jl_value_t *types JL_PROPAGATES_ROO
     jl_typemap_entry_t *entry = jl_typemap_assoc_by_type(
             mt->defs, types, /*env*/&env, /*subtype*/1, /*offs*/0, world, /*max_world_mask*/0);
     JL_GC_POP();
-    if (!entry)
+    if (entry == NULL)
         return jl_nothing;
-    if (jl_is_call_ambiguous(types, entry->func.method))
+    entry = jl_typemap_morespecific_by_type(entry, (jl_value_t*)types, &env, world);
+    if (entry == NULL)
         return jl_nothing;
     return (jl_value_t*)entry;
 }
@@ -2409,11 +2443,13 @@ struct ml_matches_env {
     size_t max_valid;
     // temporary:
     jl_svec_t *matc;   // current working svec
+    arraylist_t mambig;
     // inputs:
     size_t world;
     int lim;
     int include_ambiguous;  // whether ambiguous matches should be included
 };
+
 static int ml_matches_visitor(jl_typemap_entry_t *ml, struct typemap_intersection_env *closure0)
 {
     struct ml_matches_env *closure = container_of(closure0, struct ml_matches_env, match);
@@ -2439,12 +2475,6 @@ static int ml_matches_visitor(jl_typemap_entry_t *ml, struct typemap_intersectio
                 closure->max_valid = ml->max_world;
         }
     }
-    // In some corner cases type intersection is conservative and returns something
-    // for intersect(A, B) even though A is a dispatch tuple and !(A <: B).
-    // For dispatch purposes in such a case we know there's no match. This check
-    // fixes issue #30394.
-    if (!closure->match.issubty && jl_is_dispatch_tupletype(closure->match.type))
-        return 1;
     // a method is shadowed if type <: S <: m->sig where S is the
     // signature of another applicable method
     /*
@@ -2454,62 +2484,58 @@ static int ml_matches_visitor(jl_typemap_entry_t *ml, struct typemap_intersectio
     jl_method_t *meth = ml->func.method;
     assert(meth);
     size_t len = jl_array_len(closure->t);
-    if (closure->lim >= 0) {
-        // we can skip this match if the types are already covered
+    int done = closure0->issubty; // stop; signature fully covers queried type
+    // if this method would never actually match, we shouldn't add it to the results
+    // in certain cases
+    int return_this_match = 1;
+    if (return_this_match && closure->lim >= 0) {
+        // we can skip this match if the type intersection is already covered
         // by a prior (more specific) match. but only do this in
         // the "limited" mode used by type inference.
         for (i = 0; i < len; i++) {
-            jl_value_t *prior_ti = jl_svecref(jl_array_ptr_ref(closure->t, i), 0);
-            // TODO: should be possible to remove the `isdispatchtuple` check,
-            // but we still need it in case an intersection was approximate.
-            if (jl_is_datatype(prior_ti) && ((jl_datatype_t*)prior_ti)->isdispatchtuple &&
-                    jl_subtype(closure->match.ti, prior_ti)) {
-                return 1;
+            jl_method_t *prior_match = (jl_method_t*)jl_svecref(jl_array_ptr_ref(closure->t, i), 2);
+            jl_value_t *sig2 = (jl_value_t*)prior_match->sig;
+            if (closure->include_ambiguous && !jl_type_morespecific(sig2, (jl_value_t*)ml->sig))
+                continue;
+            if (!closure->include_ambiguous && jl_type_morespecific((jl_value_t*)ml->sig, sig2))
+                continue;
+            if (jl_subtype(closure->match.ti, sig2)) {
+                return_this_match = 0;
+                break;
             }
         }
     }
-    int done = closure0->issubty; // stop; signature fully covers queried type
-    // if we reach a definition that fully covers the arguments but there are
-    // ambiguities, then this method might not actually match, so we shouldn't
-    // add it to the results.
-    int return_this_match = 1;
-    if (meth->ambig != jl_nothing && (!closure->include_ambiguous || done)) {
-        jl_svec_t *env = NULL;
-        jl_value_t *mti = NULL;
-        JL_GC_PUSH2(&env, &mti);
-        for (size_t j = 0; j < jl_array_len(meth->ambig); j++) {
-            jl_typemap_entry_t *mambig = (jl_typemap_entry_t*)jl_array_ptr_ref(meth->ambig, j);
-            if (closure->include_ambiguous) {
-                env = jl_emptysvec;
-                mti = jl_type_intersection_env((jl_value_t*)closure->match.type,
-                                               (jl_value_t*)mambig->sig, &env);
-                if (mti != (jl_value_t*)jl_bottom_type) {
-                    assert(done);
-                    int k;
-                    for (k = 0; k < len; k++) {
-                        if (mambig->func.value == jl_svecref(jl_array_ptr_ref(closure->t, k), 2))
-                            break;
-                    }
-                    if (k >= len) {
-                        if (len == 0) {
-                            closure->t = (jl_value_t*)jl_alloc_vec_any(0);
-                        }
-                        mti = (jl_value_t*)jl_svec(3, mti, env, mambig->func.value);
-                        jl_array_ptr_1d_push((jl_array_t*)closure->t, mti);
-                        len++;
-                    }
-                }
-            }
-            else {
-                // the current method definitely never matches if the intersection with this method
-                // is also fully covered by an ambiguous method's signature
-                if (jl_subtype(closure->match.ti, (jl_value_t*)mambig->sig)) {
+    if (return_this_match && (closure->lim >= 0 || !closure->include_ambiguous)) {
+        // the current method definitely never matches if the intersection with this method
+        // is also fully covered by an earlier/ambiguous method's signature
+        if ((jl_value_t*)ml->prev != jl_nothing) {
+            size_t j, l = jl_array_len(ml->prev);
+            for (j = 0; j < l; j++) {
+                jl_typemap_entry_t *mambig = (jl_typemap_entry_t*)jl_array_ptr_ref(ml->prev, j);
+                jl_value_t *sig2 = (jl_value_t*)mambig->sig;
+                // TODO: involve and update world
+                if (closure->include_ambiguous && !jl_type_morespecific(sig2, (jl_value_t*)ml->sig))
+                    continue;
+                if (!closure->include_ambiguous && jl_type_morespecific((jl_value_t*)ml->sig, sig2))
+                    continue;
+                if (jl_subtype(closure->match.ti, sig2)) {
                     return_this_match = 0;
                     break;
                 }
             }
         }
-        JL_GC_POP();
+    }
+    if (return_this_match && !closure->include_ambiguous) {
+        size_t j, l = closure->mambig.len;
+        for (j = 0; j < l; j++) {
+            jl_value_t *sig2 = (jl_value_t*)closure->mambig.items[j];
+            if (jl_type_morespecific((jl_value_t*)ml->sig, sig2))
+                continue;
+            if (jl_subtype(closure->match.ti, sig2)) {
+                return_this_match = 0;
+                break;
+            }
+        }
     }
     if (return_this_match) {
         if (closure->lim >= 0 && len >= closure->lim) {
@@ -2525,9 +2551,25 @@ static int ml_matches_visitor(jl_typemap_entry_t *ml, struct typemap_intersectio
             jl_array_ptr_1d_push((jl_array_t*)closure->t, (jl_value_t*)closure->matc);
         }
     }
-    if (done)
-        return 0;
-    return 1;
+    else if ((jl_value_t*)ml->prev != jl_nothing) {
+        arraylist_push(&closure->mambig, ml->sig);
+    }
+    if (done && (jl_value_t*)ml->prev != jl_nothing) {
+        // if we're done now, also need to consider add any matching methods that got put in the table later than it
+        size_t j, l = jl_array_len(ml->prev);
+        for (j = 0; j < l; j++) {
+            jl_typemap_entry_t *mambig = (jl_typemap_entry_t*)jl_array_ptr_ref(ml->prev, j);
+            closure->match.issubty = 0; // set done=false so we don't get back here recursively
+            closure->match.env = jl_emptysvec;
+            closure->match.ti = jl_type_intersection_env((jl_value_t*)closure->match.type,
+                    (jl_value_t*)mambig->sig, &closure->match.env);
+            if (closure->match.ti != (jl_value_t*)jl_bottom_type) {
+                if (!ml_matches_visitor(mambig, closure0))
+                    return 0;
+            }
+        }
+    }
+    return !done;
 }
 
 // This is the collect form of calling jl_typemap_intersection_visitor
@@ -2550,6 +2592,7 @@ static jl_value_t *ml_matches(jl_typemap_t *defs, int offs,
             va = NULL;
     }
     struct ml_matches_env env;
+    arraylist_new(&env.mambig, 0);
     env.match.fptr = ml_matches_visitor;
     env.match.type = (jl_value_t*)type;
     env.match.va = va;
@@ -2567,6 +2610,7 @@ static jl_value_t *ml_matches(jl_typemap_t *defs, int offs,
     JL_GC_POP();
     *min_valid = env.min_valid;
     *max_valid = env.max_valid;
+    arraylist_free(&env.mambig);
     return env.t;
 }
 
