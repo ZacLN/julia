@@ -584,11 +584,11 @@ JL_DLLEXPORT jl_value_t *jl_new_bits(jl_value_t *dt, void *data)
     if (nb == 0)               return jl_new_struct_uninit(bt); // returns bt->instance
     if (bt == jl_bool_type)    return (1 & *(int8_t*)data) ? jl_true : jl_false;
     if (bt == jl_uint8_type)   return jl_box_uint8(*(uint8_t*)data);
-    if (bt == jl_int64_type)   return jl_box_int64(*(int64_t*)data);
+    if (bt == jl_int64_type)   return jl_box_int64((int64_t)jl_load_unaligned_i64(data));
     if (bt == jl_int32_type)   return jl_box_int32(*(int32_t*)data);
     if (bt == jl_int8_type)    return jl_box_int8(*(int8_t*)data);
     if (bt == jl_int16_type)   return jl_box_int16(*(int16_t*)data);
-    if (bt == jl_uint64_type)  return jl_box_uint64(*(uint64_t*)data);
+    if (bt == jl_uint64_type)  return jl_box_uint64(jl_load_unaligned_i64(data));
     if (bt == jl_uint32_type)  return jl_box_uint32(*(uint32_t*)data);
     if (bt == jl_uint16_type)  return jl_box_uint16(*(uint16_t*)data);
     if (bt == jl_char_type)    return jl_box_char(*(uint32_t*)data);
@@ -598,7 +598,7 @@ JL_DLLEXPORT jl_value_t *jl_new_bits(jl_value_t *dt, void *data)
     case  1: *(uint8_t*) v = *(uint8_t*)data;    break;
     case  2: *(uint16_t*)v = jl_load_unaligned_i16(data);   break;
     case  4: *(uint32_t*)v = jl_load_unaligned_i32(data);   break;
-    case  8: *(uint64_t*)v = jl_load_unaligned_i64(data);   break;
+    case  8: jl_store_unaligned_i64(v, jl_load_unaligned_i64(data));   break;
     case 16:
         memcpy(jl_assume_aligned(v, 16), data, 16);
         break;
@@ -625,7 +625,7 @@ void jl_assign_bits(void *dest, jl_value_t *bits)
     case  1: *(uint8_t*)dest    = *(uint8_t*)bits;    break;
     case  2: jl_store_unaligned_i16(dest, *(uint16_t*)bits); break;
     case  4: jl_store_unaligned_i32(dest, *(uint32_t*)bits); break;
-    case  8: jl_store_unaligned_i64(dest, *(uint64_t*)bits); break;
+    case  8: jl_store_unaligned_i64(dest, jl_load_unaligned_i64((void*)bits)); break;
     case 16:
         memcpy(dest, jl_assume_aligned(bits, 16), 16);
         break;
@@ -676,7 +676,8 @@ UNBOX_FUNC(voidpointer, void*)
         jl_ptls_t ptls = jl_get_ptls_states();                  \
         jl_value_t *v = jl_gc_alloc(ptls, nw * sizeof(void*),   \
                                     jl_##typ##_type);           \
-        *(c_type*)jl_data_ptr(v) = x;                           \
+        memcpy(jl_assume_aligned(jl_data_ptr(v), sizeof(void*)),\
+            &x, sizeof(c_type));                                \
         return v;                                               \
     }
 BOX_FUNC(float32, float,  jl_box, 1)
@@ -699,7 +700,8 @@ BOX_FUNC(float64, double, jl_box, 2)
             return boxed_##typ##_cache[idx];                    \
         jl_value_t *v = jl_gc_alloc(ptls, nw * sizeof(void*),   \
                                     jl_##typ##_type);           \
-        *(c_type*)jl_data_ptr(v) = x;                           \
+        memcpy(jl_assume_aligned(jl_data_ptr(v), sizeof(void*)),\
+            &x, sizeof(c_type));                                \
         return v;                                               \
     }
 #define UIBOX_FUNC(typ,c_type,nw)                               \
@@ -711,7 +713,8 @@ BOX_FUNC(float64, double, jl_box, 2)
             return boxed_##typ##_cache[x];                      \
         jl_value_t *v = jl_gc_alloc(ptls, nw * sizeof(void*),   \
                                     jl_##typ##_type);           \
-        *(c_type*)jl_data_ptr(v) = x;                           \
+        memcpy(jl_assume_aligned(jl_data_ptr(v), sizeof(void*)),\
+            &x, sizeof(c_type));                                \
         return v;                                               \
     }
 SIBOX_FUNC(int16,  int16_t, 1)

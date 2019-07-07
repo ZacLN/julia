@@ -183,8 +183,10 @@ static inline unsigned select_by_size(unsigned sz) JL_NOTSAFEPOINT
 #define un_iintrinsic_ctype(OP, name, nbits, c_type) \
 static inline void jl_##name##nbits(unsigned runtime_nbits, void *pa, void *pr) JL_NOTSAFEPOINT \
 { \
-    c_type a = *(c_type*)pa; \
-    *(c_type*)pr = OP(a); \
+    c_type a; \
+    memcpy(&a, pa, sizeof(c_type)); \
+    c_type r = OP(a); \
+    memcpy(pr, &r, sizeof(c_type)); \
 }
 
 // integer input, unsigned output
@@ -195,7 +197,8 @@ static inline void jl_##name##nbits(unsigned runtime_nbits, void *pa, void *pr) 
 #define uu_iintrinsic_ctype(OP, name, nbits, c_type) \
 static inline unsigned jl_##name##nbits(unsigned runtime_nbits, void *pa) JL_NOTSAFEPOINT \
 { \
-    c_type a = *(c_type*)pa; \
+    c_type a; \
+    memcpy(&a, pa, sizeof(c_type)); \
     return OP(a); \
 }
 
@@ -207,7 +210,8 @@ static inline unsigned jl_##name##nbits(unsigned runtime_nbits, void *pa) JL_NOT
 #define un_fintrinsic_ctype(OP, name, c_type) \
 static inline void name(unsigned osize, void *pa, void *pr) JL_NOTSAFEPOINT \
 { \
-    c_type a = *(c_type*)pa; \
+    c_type a; \
+    memcpy(&a, pa, sizeof(c_type)); \
     OP((c_type*)pr, a); \
 }
 
@@ -232,8 +236,9 @@ static void jl_##name##nbits(unsigned runtime_nbits, void *pa, void *pb, void *p
 #define bool_intrinsic_ctype(OP, name, nbits, c_type) \
 static int jl_##name##nbits(unsigned runtime_nbits, void *pa, void *pb) JL_NOTSAFEPOINT \
 { \
-    c_type a = *(c_type*)pa; \
-    c_type b = *(c_type*)pb; \
+    c_type a, b; \
+    memcpy(&a, pa, sizeof(c_type)); \
+    memcpy(&b, pb, sizeof(c_type)); \
     return OP(a, b); \
 }
 

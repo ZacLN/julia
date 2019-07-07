@@ -733,7 +733,8 @@ static size_t jl_static_show_x_(JL_STREAM *out, jl_value_t *v, jl_datatype_t *vt
         n += jl_printf(out, "#<intrinsic #%d %s>", f, jl_intrinsic_name(f));
     }
     else if (vt == jl_int64_type) {
-        n += jl_printf(out, "%" PRId64, *(int64_t*)v);
+        n += jl_printf(out, "%" PRId64, (int64_t)
+            jl_load_unaligned_i64((void*)v));
     }
     else if (vt == jl_int32_type) {
         n += jl_printf(out, "%" PRId32, *(int32_t*)v);
@@ -745,7 +746,8 @@ static size_t jl_static_show_x_(JL_STREAM *out, jl_value_t *v, jl_datatype_t *vt
         n += jl_printf(out, "%" PRId8, *(int8_t*)v);
     }
     else if (vt == jl_uint64_type) {
-        n += jl_printf(out, "0x%016" PRIx64, *(uint64_t*)v);
+        n += jl_printf(out, "0x%016" PRIx64,
+            jl_load_unaligned_i64((void*)v));
     }
     else if (vt == jl_uint32_type) {
         n += jl_printf(out, "0x%08" PRIx32, *(uint32_t*)v);

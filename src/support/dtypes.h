@@ -221,6 +221,12 @@ typedef enum { T_INT8, T_UINT8, T_INT16, T_UINT16, T_INT32, T_UINT32,
 #define JL_UNUSED
 #endif
 
+STATIC_INLINE double jl_load_unaligned_f64(const void *ptr) JL_NOTSAFEPOINT
+{
+    double val;
+    memcpy(&val, ptr, 8);
+    return val;
+}
 STATIC_INLINE uint64_t jl_load_unaligned_i64(const void *ptr) JL_NOTSAFEPOINT
 {
     uint64_t val;
