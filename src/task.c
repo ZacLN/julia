@@ -224,6 +224,77 @@ JL_DLLEXPORT void julia_init(JL_IMAGE_SEARCH rel)
 
 void jl_release_task_stack(jl_ptls_t ptls, jl_task_t *task);
 
+// This duplicates some of ctx_switch. TODO: Unify
+JL_DLLEXPORT jl_task_t *deschedule_task() {
+    jl_ptls_t ptls = jl_get_ptls_states();
+    jl_task_t *t = ptls->root_task;
+    jl_task_t *lastt = ptls->current_task;
+#ifdef JULIA_ENABLE_THREADING
+    // If the current task is not holding any locks, free the locks list
+    // so that it can be GC'd without leaking memory
+    arraylist_t *locks = &lastt->locks;
+    if (locks->len == 0 && locks->items != locks->_space) {
+        arraylist_free(locks);
+        arraylist_new(locks, 0);
+    }
+#endif
+
+    int killed = (lastt->state == done_sym || lastt->state == failed_sym);
+    lastt->gcstack = NULL;
+    if (!lastt->copy_stack && lastt->stkbuf) {
+        // early free of stkbuf back to the pool
+        jl_release_task_stack(ptls, lastt);
+    }
+
+    // set up global state for new task
+    lastt->gcstack = ptls->pgcstack;
+    lastt->world_age = ptls->world_age;
+    ptls->pgcstack = t->gcstack;
+    ptls->world_age = t->world_age;
+    t->gcstack = NULL;
+#ifdef MIGRATE_TASKS
+    ptls->previous_task = lastt;
+#endif
+    ptls->current_task = t;
+
+    return lastt;
+}
+
+JL_DLLEXPORT void schedule_task(jl_task_t *t) {
+    jl_ptls_t ptls = jl_get_ptls_states();
+    jl_task_t *lastt = ptls->current_task;
+#ifdef JULIA_ENABLE_THREADING
+    // If the current task is not holding any locks, free the locks list
+    // so that it can be GC'd without leaking memory
+    arraylist_t *locks = &lastt->locks;
+    if (locks->len == 0 && locks->items != locks->_space) {
+        arraylist_free(locks);
+        arraylist_new(locks, 0);
+    }
+#endif
+
+    int killed = (lastt->state == done_sym || lastt->state == failed_sym);
+    lastt->gcstack = NULL;
+    if (!lastt->copy_stack && lastt->stkbuf) {
+        // early free of stkbuf back to the pool
+        jl_release_task_stack(ptls, lastt);
+    }
+
+    // set up global state for new task
+    lastt->gcstack = ptls->pgcstack;
+    lastt->world_age = ptls->world_age;
+    ptls->pgcstack = t->gcstack;
+    ptls->world_age = t->world_age;
+    t->gcstack = NULL;
+#ifdef MIGRATE_TASKS
+    ptls->previous_task = lastt;
+#endif
+    ptls->current_task = t;
+
+    return;
+}
+
+
 static void ctx_switch(jl_ptls_t ptls, jl_task_t **pt)
 {
     jl_task_t *t = *pt;
@@ -319,9 +390,11 @@ static void ctx_switch(jl_ptls_t ptls, jl_task_t **pt)
             jl_swap_fiber(lastt_ctx, &t->ctx);
     }
     else {
+#ifndef JL_HAVE_BYSYNCIFY
         if (always_copy_stacks)
             jl_longjmp(ptls->base_ctx.uc_mcontext, 1);
         else
+#endif
             jl_start_fiber(lastt_ctx, &t->ctx);
     }
 }
@@ -557,6 +630,13 @@ JL_DLLEXPORT jl_value_t *jl_get_current_task(void)
     return (jl_value_t*)ptls->current_task;
 }
 
+#ifdef JL_HAVE_BYSYNCIFY
+JL_DLLEXPORT jl_ucontext_t *task_ctx_ptr(jl_task_t *t)
+{
+    return &t->ctx;
+}
+#endif
+
 // Do one-time initializations for task system
 void jl_init_tasks(void) JL_GC_DISABLED
 {
@@ -565,7 +645,13 @@ void jl_init_tasks(void) JL_GC_DISABLED
     runnable_sym = jl_symbol("runnable");
 }
 
-static void NOINLINE JL_NORETURN start_task(void)
+#ifdef JL_HAVE_BYSYNCIFY
+// Switching logic is implemented in JavaScript
+JL_DLLEXPORT
+#else
+static
+#endif
+void NOINLINE JL_NORETURN start_task(void)
 {
     // this runs the first time we switch to a task
     jl_ptls_t ptls = jl_get_ptls_states();
@@ -931,6 +1017,22 @@ static void jl_init_basefiber(size_t ssize)
 }
 #endif
 
+#if defined(JL_HAVE_BYSYNCIFY)
+static void jl_init_basefiber(size_t ssize)
+{
+}
+static char *jl_alloc_fiber(jl_ucontext_t *t, size_t *ssize, jl_task_t *owner) JL_NOTSAFEPOINT
+{
+    void *stk = jl_malloc_stack(ssize, owner);
+    if (stk == NULL)
+        return NULL;
+    t->stackbottom = stk;
+    t->stacktop = ((char*)stk) + *ssize;
+    return (char*)stk;
+}
+// jl_*_fiber implemented in js
+#endif
+
 // Initialize a root task using the given stack.
 void jl_init_root_task(void *stack_lo, void *stack_hi)
 {
@@ -978,15 +1080,17 @@ void jl_init_root_task(void *stack_lo, void *stack_hi)
     arraylist_new(&ptls->current_task->locks, 0);
 #endif
 
+#ifdef COPY_STACKS
     if (always_copy_stacks) {
         ptls->stackbase = stack_hi;
         ptls->stacksize = ssize;
         if (jl_setjmp(ptls->base_ctx.uc_mcontext, 0))
             start_task();
+        return;
     }
-    else {
-        jl_init_basefiber(JL_STACK_SIZE);
-    }
+#endif
+
+    jl_init_basefiber(JL_STACK_SIZE);
 }
 
 JL_DLLEXPORT int jl_is_task_started(jl_task_t *t)
