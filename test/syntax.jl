@@ -1861,13 +1861,3 @@ let
     a32325(x) = a32325()
 end
 @test a32325(0) === a32325()
-
-# PR #32408
-@test Meta.parse("try catch var\"##\" ; end") ==
-    Expr(:try,
-         Expr(:block),
-         Expr(:macrocall, Symbol("@var_str"), LineNumberNode(1,:none), "##"),
-         Expr(:block, LineNumberNode(1,:none)))
-@test Meta.parse("function var\"#\" end") ==
-    Expr(:function,
-         Expr(:macrocall, Symbol("@var_str"), LineNumberNode(1,:none), "#"))
