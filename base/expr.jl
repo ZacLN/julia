@@ -427,24 +427,3 @@ macro generated(f)
         error("invalid syntax; @generated must be used with a function definition")
     end
 end
-
-"""
-    @var_str(str) -> Symbol
-
-Refer to a variable named `Symbol(str)`, even when `str` is not a valid name
-in normal Julia source code.
-
-This can help interoperability with programming languages which have different
-rules for the construction of valid identifiers. For example, to refer to the
-`R` variable `draw.segments`, you can use `var"draw.segments"` in your Julia
-code.
-
-`@var_str` is also used to `show` julia source code which has been macro
-expanded or otherwise contains variable names which can't be parsed normally.
-
-!!! compat "Julia 1.3"
-    This macro requires at least Julia 1.3.
-"""
-macro var_str(str)
-    esc(Symbol(str))
-end

@@ -25,7 +25,6 @@ New library functions
 * `findfirst`, `findlast`, `findnext` and `findprev` now accept a character as first argument
   to search for that character in a string passed as the second argument ([#31664]).
 * New `findall(pattern, string)` method where `pattern` is a string or regex ([#31834]).
-* The `@var_str` string macro can create variable names which won't parse as normal julia syntax ([#32408]).
 
 Standard library changes
 ------------------------
