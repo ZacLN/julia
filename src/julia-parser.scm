@@ -2334,14 +2334,17 @@
                   (head (if (eq? (peek-token s) '|.|)
                             (begin (take-token s) '__dot__)
                             (parse-atom s #f))))
-              (peek-token s)
-              (if (ts:space? s)
-                  (maybe-docstring
-                   s `(macrocall ,(macroify-name head)
-                                 ,startloc
-                                 ,@(parse-space-separated-exprs s)))
-                  (let ((call (parse-call-chain s head #t)))
-                    (macroify-call s call startloc))))))
+              (if (string? head)
+                  (symbol head) ;; @"#any-sym-literal"
+                  (begin
+                    (peek-token s)
+                    (if (ts:space? s)
+                        (maybe-docstring
+                         s `(macrocall ,(macroify-name head)
+                                       ,startloc
+                                       ,@(parse-space-separated-exprs s)))
+                        (let ((call (parse-call-chain s head #t)))
+                          (macroify-call s call startloc))))))))
           ;; command syntax
           ((eqv? t #\`)
            (take-token s)
