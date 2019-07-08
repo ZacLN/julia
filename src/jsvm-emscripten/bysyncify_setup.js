@@ -2,7 +2,6 @@ Module.preRun.push(function() {
     Bysyncify.instrumentWasmExports = function (exports) { return exports; };
     Bysyncify.handleSleep = function (startAsync) {
         if (ABORT) return;
-        alert('In Custom handleSleep');
         Module['noExitRuntime'] = true;
         if (Bysyncify.state === Bysyncify.State.Normal) {
             // Prepare to sleep. Call startAsync, and see what happens:
@@ -65,6 +64,25 @@ function deschedule_current_task() {
     }
 }
 
+function do_start_task(old_stack)
+{
+    try {
+        // start_task is always the entry point for any task
+        Module['_start_task']();
+    } catch(e) {
+        stackRestore(old_stack)
+        if (e !== e+0 && e !== 'killed') throw e;
+        return;
+    }
+    // Either unwind or normal exit. In either case, we're back at the main task
+    if (Bysyncify.state === Bysyncify.State.Unwinding) {
+        // We just finished unwinding for a sleep.
+        Bysyncify.state = Bysyncify.State.Normal;
+        Module['_bysyncify_stop_unwind']();
+    }
+    stackRestore(old_stack);
+}
+
 function initiate_schedule_task(task) {
     // Bysyncify doesn't touch the C stack or our global
     // state. Restore both eagerly.
@@ -80,16 +98,7 @@ function initiate_schedule_task(task) {
     if (Browser.mainLoop.func) {
         Browser.mainLoop.resume();
     }
-    // start_task is always the entry point for any task
-    try {
-        Module['_start_task']();
-    } catch(e) {
-        stackRestore(old_stack);
-        if (e !== e+0 && e !== 'killed') throw e;
-        return;
-    }
-    assert(false, "TODO: Something definitely needs to be implemented here.")
-    stackRestore(old_stack);
+    do_start_task(old_stack)
 }
 
 function finish_schedule_task() {

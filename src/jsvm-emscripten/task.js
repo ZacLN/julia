@@ -14,22 +14,7 @@ mergeInto(LibraryManager.library, {
     // Stack grows down
     new_stack = HEAP32[ctx + 4 >> 2];
     stackRestore(new_stack);
-    try {
-      Module['_start_task']();
-    } catch(e) {
-      stackRestore(old_stack)
-      if (e !== e+0 && e !== 'killed') throw e;
-      return;
-    }
-    // Either unwind or normal exit. In either case, we're back at the main task
-    if (Bysyncify.state === Bysyncify.State.Unwinding) {
-      // We just finished unwinding for a sleep.
-      Bysyncify.state = Bysyncify.State.Normal;
-      Module['_bysyncify_stop_unwind']();
-    }
-    alert('Back in the main task');
-    // Restore old C stack
-    stackRestore(old_stack)
+    do_start_task(old_stack)
   }
 });
 
