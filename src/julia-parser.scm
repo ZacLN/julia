@@ -2285,7 +2285,11 @@
                (begin (check-identifier t)
                       (if (closing-token? t)
                           (error (string "unexpected \"" (take-token s) "\"")))))
-           (take-token s))
+           (take-token s)
+           (if (and (eq? t 'var) (eqv? (peek-token s) #\") (not (ts:space? s)))
+             (begin (take-token s) ;; var"funky identifier" syntax
+                    (symbol (parse-raw-literal s #\")))
+             t))
 
           ;; parens or tuple
           ((eqv? t #\( )
