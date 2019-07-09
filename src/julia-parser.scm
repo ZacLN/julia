@@ -2271,15 +2271,10 @@
                  ':
                  (if (or (ts:space? s) (eqv? nxt #\newline))
                      (error "space not allowed after \":\" used for quoting")
-                     ;; being inside quote makes `end` non-special again. issue #27690
-                     (with-bindings
-                       ((end-symbol #f))
-                       (let ((x (parse-atom s #f)))
-                         (cond ((string? x)
-                                `(quote ,(symbol x)))
-                               ((and (pair? x) (eq? (car x) 'string))
-                                `(call (core Symbol) ,x))
-                               (else `(quote ,x)))))))))
+                     (list 'quote
+                           ;; being inside quote makes `end` non-special again. issue #27690
+                           (with-bindings ((end-symbol #f))
+                                          (parse-atom s #f)))))))
 
           ;; misplaced =
           ((eq? t '=) (error "unexpected \"=\""))
